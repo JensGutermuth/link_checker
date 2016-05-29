@@ -63,3 +63,6 @@ if __name__ == '__main__':
             print("{}: {}\nFound on:".format(code, url))
             for ref in referers[url]:
                 print("    {}".format(ref))
+
+    if any(code >= 400 for code in visited.values()):
+        sys.exit(1)
