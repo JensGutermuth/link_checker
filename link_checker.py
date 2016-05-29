@@ -99,6 +99,11 @@ if __name__ == '__main__':
 
     link_checker.run(10)
 
+    print("checked {} urls, {} returned errors.".format(
+        len(link_checker.visited),
+        [code >= 400 for code in link_checker.visited.values()].count(True)
+    ))
+
     for url, code in sorted(link_checker.visited.items(), key=lambda e: e[0]):
         if code >= 400:
             print("{}: {}\nFound on:".format(code, url))
