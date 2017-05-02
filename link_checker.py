@@ -116,12 +116,13 @@ if __name__ == '__main__':
                 HandlerClass=http.server.SimpleHTTPRequestHandler,
                 bind="127.0.0.1"
             ),
+            daemon=True
         )
         local_server_thread.start()
 
     link_checker = LinkChecker(urls)
 
-    link_checker.run(1 if local_server_thread else 10)
+    link_checker.run(10)
 
     print("checked {} urls, {} returned errors.".format(
         len(link_checker.visited),
