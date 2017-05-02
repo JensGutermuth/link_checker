@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
+import os
 import sys
+import http.server
+from threading import Event, Thread, Condition, \
+    BoundedSemaphore
 from contextlib import suppress
-from threading import BoundedSemaphore, Condition, Event, Thread
 from urllib.parse import urljoin, urlsplit
 
 import requests
@@ -95,9 +98,30 @@ class LinkChecker(object):
 
 
 if __name__ == '__main__':
-    link_checker = LinkChecker(sys.argv[1:])
+    urls = sys.argv[1:]
+    local_server_thread = None
+    if len(urls) == 0:
+        print('checking links in files found in current directory')
+        for r, _, files in os.walk('.'):
+            for f in files:
+                f = os.path.join(r, f)
+                if f.startswith('./'):
+                    f = f[2:]
+                if f.endswith('index.html'):
+                    f = f[:-len('index.html')]
+                urls.append('http://127.0.0.1:8000/' + f)
 
-    link_checker.run(10)
+        local_server_thread = Thread(
+            target=lambda: http.server.test(
+                HandlerClass=http.server.SimpleHTTPRequestHandler,
+                bind="127.0.0.1"
+            ),
+        )
+        local_server_thread.start()
+
+    link_checker = LinkChecker(urls)
+
+    link_checker.run(1 if local_server_thread else 10)
 
     print("checked {} urls, {} returned errors.".format(
         len(link_checker.visited),

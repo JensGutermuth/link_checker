@@ -12,3 +12,5 @@ source venv/bin/activate
 pip install -r requirements.txt
 ./link_checker.py <start_url>...
 ```
+
+Alternatively use `link_checker.py` without arguments to check for dead links in the files in the current working directory.
