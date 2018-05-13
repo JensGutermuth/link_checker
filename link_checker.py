@@ -69,7 +69,8 @@ class LinkChecker(object):
                         continue
             if DEBUG:
                 print(id, url)
-            r = requests.get(url)
+            ua = 'link_checker (https://github.com/Delphinator/link_checker)'
+            r = requests.get(url, headers={'User-Agent': ua})
 
             with self.cv:
                 self.visited[url] = r.status_code
