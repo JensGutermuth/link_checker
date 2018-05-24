@@ -30,8 +30,15 @@ class LinkChecker(object):
         self.done = Event()
 
     def link_extractor(self, html, url):
+        # obvious
         img_selector = CSSSelector('img')
         a_selector = CSSSelector('a')
+        script_selector = CSSSelector('script')
+
+        # stylesheets, rel="preload"-stuff and much more
+        link_selector = CSSSelector('link')
+        # HTML5 <picture>-Element
+        source_selector = CSSSelector('source')
 
         def urls_generator():
             for img in img_selector(html):
@@ -39,10 +46,32 @@ class LinkChecker(object):
                     yield urljoin(url, img.attrib['src'])
                 with suppress(KeyError):
                     yield urljoin(url, img.attrib['data-src'])
+                with suppress(KeyError):
+                    # format: url [width], ...
+                    for src in img.attrib['srcset'].split(','):
+                        src = src.strip().split()[0]
+                        yield urljoin(url, src)
 
             for a in a_selector(html):
                 with suppress(KeyError):
                     yield urljoin(url, a.attrib['href'])
+
+            for s in script_selector(html):
+                with suppress(KeyError):
+                    yield urljoin(url, s.attrib['src'])
+
+            for l in link_selector(html):
+                with suppress(KeyError):
+                    yield urljoin(url, l.attrib['href'])
+
+            for s in source_selector(html):
+                with suppress(KeyError):
+                    yield urljoin(url, s.attrib['src'])
+                with suppress(KeyError):
+                    # format: url [width], ...
+                    for src in s.attrib['srcset'].split(','):
+                        src = src.strip().split()[0]
+                        yield urljoin(url, src)
 
         return set(urls_generator())
 
