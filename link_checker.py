@@ -73,7 +73,7 @@ class LinkChecker(object):
                         src = src.strip().split()[0]
                         yield urljoin(url, src)
 
-        return set(urls_generator())
+        return set(u.split('#')[0] for u in urls_generator())
 
     def process_queued_urls(self, idx):
         id = "Thread {}:".format(idx)
