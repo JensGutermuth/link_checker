@@ -98,7 +98,9 @@ class LinkChecker(object):
                         continue
             if DEBUG:
                 print(id, url)
-            ua = 'link_checker (https://github.com/Delphinator/link_checker)'
+            ua = 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) ' + \
+                 'Gecko/20100101 Firefox/84.0 ' + \
+                 '(compatible; link_checker https://github.com/Delphinator/link_checker)'
             r = requests.get(url, headers={'User-Agent': ua})
 
             with self.cv:
