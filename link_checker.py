@@ -167,5 +167,6 @@ if __name__ == '__main__':
             for ref in link_checker.referers[url]:
                 print("    {}".format(ref))
 
-    if any(code >= 400 for code in link_checker.visited.values()):
+    if any((code >= 400 and code != 429)
+           for code in link_checker.visited.values()):
         sys.exit(1)
