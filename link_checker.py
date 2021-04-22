@@ -81,7 +81,10 @@ async def check_urls(client: httpx.AsyncClient, urls: typing.Iterable,
                 r = await client.get(
                     url, headers={b"User-Agent": user_agent.encode("ascii")})
         except (httpx.NetworkError, httpx.TimeoutException, httpx.ProtocolError) as e:
-            return url, None, str(e)
+            err_str = str(e)
+            if not err_str:
+                err_str = "Error: " + repr(e)
+            return url, None, err_str
 
         if r.status_code != httpx.codes.OK and r.status_code not in ignore_http_codes:
             return url, r, f"HTTP Error {r.status_code}: {r.reason_phrase}"
