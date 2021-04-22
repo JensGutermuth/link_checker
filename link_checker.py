@@ -11,6 +11,7 @@ from collections import defaultdict
 from contextlib import suppress
 from urllib.parse import unquote, urljoin, urlsplit
 
+import h2.exceptions
 import httpcore
 import httpx
 from httpcore._types import URL, Headers
@@ -75,7 +76,7 @@ async def check_urls(client: httpx.AsyncClient, urls: typing.Iterable,
                      ignore_http_codes: typing.Collection[int]):
     request_for = defaultdict(asyncio.BoundedSemaphore)
 
-    async def make_request(url):
+    async def make_request(url, attempt: int = 1):
         try:
             async with request_for[urlsplit(url).hostname]:
                 r = await client.get(
@@ -85,6 +86,22 @@ async def check_urls(client: httpx.AsyncClient, urls: typing.Iterable,
             if not err_str:
                 err_str = "Error: " + repr(e)
             return url, None, err_str
+        except h2.exceptions.ProtocolError as e:
+            err_str = str(e)
+            if 'RECV_HEADERS' not in err_str or 'CLOSED' not in err_str:
+                raise
+            # The full error is
+            # h2.exceptions.ProtocolError: Invalid input ConnectionInputs.RECV_HEADERS in state ConnectionState.CLOSED
+            # This happens if we've exceeded the number of requests the server will
+            # handle using this connection. The default for nginx is apparently 1000,
+            # which is very possible to hit. If this happens our best guess is to just
+            # try again.
+
+            if attempt >= 3:
+                # we've tried three times? That can't be right...
+                raise
+
+            return await make_request(url, attempt=attempt+1)
 
         if r.status_code != httpx.codes.OK and r.status_code not in ignore_http_codes:
             return url, r, f"HTTP Error {r.status_code}: {r.reason_phrase}"
