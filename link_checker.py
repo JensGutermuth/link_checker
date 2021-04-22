@@ -1,172 +1,194 @@
 #!/usr/bin/env python3
+import argparse
+import asyncio
+import fnmatch
+import mimetypes
 import os
+import posixpath
 import sys
-import http.server
-from threading import Event, Thread, Condition, \
-    BoundedSemaphore
+import typing
+from collections import defaultdict
 from contextlib import suppress
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
-import requests
+import httpcore
+import httpx
+from httpcore._types import URL, Headers
 from lxml import etree
 from lxml.cssselect import CSSSelector
 
-DEBUG = False
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) ' + \
+             'Gecko/20100101 Firefox/84.0 ' + \
+             '(compatible; link_checker https://github.com/Delphinator/link_checker)'
+
+def extract_links(html_content, url):
+    html = etree.HTML(html_content)
+    # obvious
+    img_selector = CSSSelector('img')
+    a_selector = CSSSelector('a')
+    script_selector = CSSSelector('script')
+
+    # stylesheets, rel="preload"-stuff and much more
+    link_selector = CSSSelector('link')
+    # HTML5 <picture>-Element
+    source_selector = CSSSelector('source')
+
+    def urls_generator():
+        for img in img_selector(html):
+            with suppress(KeyError):
+                yield urljoin(url, img.attrib['src'])
+            with suppress(KeyError):
+                yield urljoin(url, img.attrib['data-src'])
+            with suppress(KeyError):
+                # format: url [width], ...
+                for src in img.attrib['srcset'].split(','):
+                    src = src.strip().split()[0]
+                    yield urljoin(url, src)
+
+        for a in a_selector(html):
+            with suppress(KeyError):
+                yield urljoin(url, a.attrib['href'])
+
+        for s in script_selector(html):
+            with suppress(KeyError):
+                yield urljoin(url, s.attrib['src'])
+
+        for l in link_selector(html):
+            with suppress(KeyError):
+                yield urljoin(url, l.attrib['href'])
+
+        for s in source_selector(html):
+            with suppress(KeyError):
+                yield urljoin(url, s.attrib['src'])
+            with suppress(KeyError):
+                # format: url [width], ...
+                for src in s.attrib['srcset'].split(','):
+                    src = src.strip().split()[0]
+                    yield urljoin(url, src)
+
+    return set(u.split('#')[0] for u in urls_generator())
 
 
-class LinkChecker(object):
-    def __init__(self, start_urls):
-        # urls are SCHEME://NETLOC/PATH
-        self.recursive_netlocs = set(urlsplit(u).netloc for u in start_urls)
-        # key: url, value: referers
-        self.referers = dict((u, set(['commandline'])) for u in start_urls)
-        # key: url, value: http response code
-        self.visited = dict()
-        self.queued = set(start_urls)
-        self.ignored = set()
-        self.cv = Condition()
-        self.waiting = 0
-        self.num_workers = 0
-        self.done = Event()
+async def check_urls(client: httpx.AsyncClient, urls: typing.Iterable,
+                     recurse_in_domains: typing.Collection[str], user_agent: str,
+                     ignore: typing.Collection[str], ignore_glob: typing.Collection[str]):
+    request_for = defaultdict(asyncio.BoundedSemaphore)
 
-    def link_extractor(self, html, url):
-        # obvious
-        img_selector = CSSSelector('img')
-        a_selector = CSSSelector('a')
-        script_selector = CSSSelector('script')
+    async def make_request(url):
+        try:
+            async with request_for[urlsplit(url).hostname]:
+                r = await client.get(
+                    url, headers={b"User-Agent": user_agent.encode("ascii")})
+        except (httpx.NetworkError, httpx.TimeoutException, httpx.ProtocolError) as e:
+            return url, None, str(e)
 
-        # stylesheets, rel="preload"-stuff and much more
-        link_selector = CSSSelector('link')
-        # HTML5 <picture>-Element
-        source_selector = CSSSelector('source')
+        if r.status_code != httpx.codes.OK:
+            return url, r, f"HTTP Error {r.status_code}: {r.reason_phrase}"
 
-        def urls_generator():
-            for img in img_selector(html):
-                with suppress(KeyError):
-                    yield urljoin(url, img.attrib['src'])
-                with suppress(KeyError):
-                    yield urljoin(url, img.attrib['data-src'])
-                with suppress(KeyError):
-                    # format: url [width], ...
-                    for src in img.attrib['srcset'].split(','):
-                        src = src.strip().split()[0]
-                        yield urljoin(url, src)
+        return url, r, None
 
-            for a in a_selector(html):
-                with suppress(KeyError):
-                    yield urljoin(url, a.attrib['href'])
+    seen_urls = defaultdict(set)
+    for u in urls:
+        seen_urls[u].add("(command line)")
 
-            for s in script_selector(html):
-                with suppress(KeyError):
-                    yield urljoin(url, s.attrib['src'])
+    running_tasks = set(asyncio.create_task(make_request(u)) for u in seen_urls)
+    errors: typing.Dict[str, str] = {}
 
-            for l in link_selector(html):
-                with suppress(KeyError):
-                    yield urljoin(url, l.attrib['href'])
-
-            for s in source_selector(html):
-                with suppress(KeyError):
-                    yield urljoin(url, s.attrib['src'])
-                with suppress(KeyError):
-                    # format: url [width], ...
-                    for src in s.attrib['srcset'].split(','):
-                        src = src.strip().split()[0]
-                        yield urljoin(url, src)
-
-        return set(u.split('#')[0] for u in urls_generator())
-
-    def process_queued_urls(self, idx):
-        id = "Thread {}:".format(idx)
-        while True:
-            with self.cv:
-                try:
-                    url = self.queued.pop()
-                except KeyError:
-                    if DEBUG:
-                        print(id, "waiting...")
-                    self.waiting += 1
-                    if self.num_workers == self.waiting:
-                        # every thread is waiting => done
-                        self.done.set()
-                        self.cv.notify_all()
-                        if DEBUG:
-                            print(id, "done")
-                        return
-                    else:
-                        self.cv.wait()
-                        self.waiting -= 1
+    while running_tasks:
+        finished_tasks, running_tasks = await asyncio.wait(running_tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in finished_tasks:
+            req_url, r, e = await task
+            if e:
+                errors[req_url] = str(e)
+            elif r.headers['Content-Type'].startswith("text/html") and urlsplit(req_url).netloc in recurse_in_domains:
+                for url in extract_links(r.content, str(r.url)):
+                    if urlsplit(url).scheme == "mailto":
                         continue
-            if DEBUG:
-                print(id, url)
-            ua = 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) ' + \
-                 'Gecko/20100101 Firefox/84.0 ' + \
-                 '(compatible; link_checker https://github.com/Delphinator/link_checker)'
-            r = requests.get(url, headers={'User-Agent': ua})
+                    if url in ignore or any(fnmatch.fnmatchcase(url, p) for p in ignore_glob):
+                        continue
+                    seen_urls[url].add(str(req_url))
+                    if len(seen_urls[url]) == 1:
+                        running_tasks.add(asyncio.create_task(make_request(url)))
+    seen_urls.default_factory = None
+    for url, error in sorted(errors.items()):
+        print(f"{url}:")
+        print(f"\tfound on:\n" + "\n".join(f"\t- {u}" for u in seen_urls[url]))
+        print(f"\t{error}")
+    print(f"{len(seen_urls)} URLs checked in total, {len(errors)} errors")
+    return not errors
 
-            with self.cv:
-                self.visited[url] = r.status_code
-                if r.status_code == 200 and \
-                        r.headers['content-type'].startswith('text/html') and \
-                        urlsplit(url).netloc in self.recursive_netlocs:
-                    for found_url in self.link_extractor(etree.HTML(r.content), url):
-                        if urlsplit(found_url).scheme not in ['http', 'https']:
-                            continue
-                        try:
-                            self.referers[found_url].add(url)
-                            # no KeyError? => we've already seen this one
-                        except KeyError:
-                            self.referers[found_url] = set([url])
-                            self.queued.add(found_url)
-                            self.cv.notify()
 
-    def run(self, num_workers):
-        threadpool = [Thread(target=self.process_queued_urls, args=(i,), daemon=False)
-                      for i in range(num_workers)]
-        self.waiting = 0
-        self.num_workers = num_workers
-        self.done.clear()
-        [t.start() for t in threadpool]
-        [t.join() for t in threadpool]
+async def chunked_file(f):
+    for chunk in iter(lambda: f.read(2**20), b''):
+        yield chunk
+
+
+class AsyncStaticFileTransport(httpcore.AsyncHTTPTransport):
+    def __init__(self, directory: str):
+        self.directory = directory
+
+    async def arequest(self, method: bytes, url: URL, headers: Headers = None,
+                       stream: httpcore.AsyncByteStream = None,
+                       ext: dict = None) -> typing.Tuple[int, Headers, httpcore.AsyncByteStream, dict]:
+
+        if method != b'GET':
+            return 400, {}, httpcore.PlainByteStream(b''), {}
+
+        path = posixpath.normpath(unquote(url[3]))
+
+        # don't allow any path seperators that are not /
+        for sep in (os.path.sep, os.path.altsep):
+            if sep not in (None, '/') and sep in path:
+                return 404, {}, httpcore.PlainByteStream(b''), {}
+
+        if '/../' in path:
+            return 404, {}, httpcore.PlainByteStream(b''), {}
+
+        contenttype, _ = mimetypes.guess_type(path)
+        if not contenttype:
+            contenttype = "application/octet-steam"
+        headers = {b"Content-Type": contenttype.encode("ascii")}
+        try:
+            try:
+                f = open(os.path.join(self.directory, path.lstrip('/')), "rb")
+            except IsADirectoryError:
+                headers[b"Content-Type"] = b"text/html"
+                f = open(os.path.join(self.directory, path.lstrip('/'), "index.html"), "rb")
+
+            return 200, headers, \
+                httpcore.AsyncIteratorByteStream(chunked_file(f)), \
+                {}
+        except FileNotFoundError:
+            return 404, {}, httpcore.PlainByteStream(b''), {}
+
+
+async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--mount', nargs=2, action="append", default=[])
+    parser.add_argument('--recurse-in-domain', action="append", default=[])
+    parser.add_argument('--user-agent', default=USER_AGENT)
+    parser.add_argument('--ignore', action="append", default=[])
+    parser.add_argument('--ignore-glob', action="append", default=[])
+    parser.add_argument('--disable-certificate-verification', action="append", default=[])
+    parser.add_argument('urls', nargs='*', default=[])
+
+    args = parser.parse_args()
+    mounts = {"all://": httpx.AsyncHTTPTransport(http2=True)}
+
+    for hostname in args.disable_certificate_verification:
+        mounts[f"https://{hostname}"] = httpx.AsyncHTTPTransport(verify=False)
+
+    for directory, url in args.mount:
+        mounts[url] = AsyncStaticFileTransport(directory=directory)
+
+    async with httpx.AsyncClient(mounts=mounts) as client:
+        return await check_urls(
+            client=client, urls=args.urls, recurse_in_domains=set(args.recurse_in_domain),
+            user_agent=args.user_agent, ignore=set(args.ignore), ignore_glob=set(args.ignore_glob))
 
 
 if __name__ == '__main__':
-    urls = sys.argv[1:]
-    local_server_thread = None
-    if len(urls) == 0:
-        print('checking links in files found in current directory')
-        for r, _, files in os.walk('.'):
-            for f in files:
-                f = os.path.join(r, f)
-                if f.startswith('./'):
-                    f = f[2:]
-                if f.endswith('index.html'):
-                    f = f[:-len('index.html')]
-                urls.append('http://127.0.0.1:8000/' + f)
-
-        local_server_thread = Thread(
-            target=lambda: http.server.test(
-                HandlerClass=http.server.SimpleHTTPRequestHandler,
-                bind="127.0.0.1"
-            ),
-            daemon=True
-        )
-        local_server_thread.start()
-
-    link_checker = LinkChecker(urls)
-
-    link_checker.run(10)
-
-    print("checked {} urls, {} returned errors.".format(
-        len(link_checker.visited),
-        [code >= 400 for code in link_checker.visited.values()].count(True)
-    ))
-
-    for url, code in sorted(link_checker.visited.items(), key=lambda e: e[0]):
-        if code >= 400:
-            print("{}: {}\nFound on:".format(code, url))
-            for ref in link_checker.referers[url]:
-                print("    {}".format(ref))
-
-    if any((code >= 400 and code != 429)
-           for code in link_checker.visited.values()):
+    if asyncio.run(main()):
+        sys.exit(0)
+    else:
         sys.exit(1)
