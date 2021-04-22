@@ -71,7 +71,8 @@ def extract_links(html_content, url):
 
 async def check_urls(client: httpx.AsyncClient, urls: typing.Iterable,
                      recurse_in_domains: typing.Collection[str], user_agent: str,
-                     ignore: typing.Collection[str], ignore_glob: typing.Collection[str]):
+                     ignore: typing.Collection[str], ignore_glob: typing.Collection[str],
+                     ignore_http_codes: typing.Collection[int]):
     request_for = defaultdict(asyncio.BoundedSemaphore)
 
     async def make_request(url):
@@ -82,7 +83,7 @@ async def check_urls(client: httpx.AsyncClient, urls: typing.Iterable,
         except (httpx.NetworkError, httpx.TimeoutException, httpx.ProtocolError) as e:
             return url, None, str(e)
 
-        if r.status_code != httpx.codes.OK:
+        if r.status_code != httpx.codes.OK and r.status_code not in ignore_http_codes:
             return url, r, f"HTTP Error {r.status_code}: {r.reason_phrase}"
 
         return url, r, None
@@ -169,6 +170,7 @@ async def main():
     parser.add_argument('--user-agent', default=USER_AGENT)
     parser.add_argument('--ignore', action="append", default=[])
     parser.add_argument('--ignore-glob', action="append", default=[])
+    parser.add_argument('--ignore-http-code', action="append", default=[])
     parser.add_argument('--disable-certificate-verification', action="append", default=[])
     parser.add_argument('urls', nargs='*', default=[])
 
@@ -184,7 +186,8 @@ async def main():
     async with httpx.AsyncClient(mounts=mounts) as client:
         return await check_urls(
             client=client, urls=args.urls, recurse_in_domains=set(args.recurse_in_domain),
-            user_agent=args.user_agent, ignore=set(args.ignore), ignore_glob=set(args.ignore_glob))
+            user_agent=args.user_agent, ignore=set(args.ignore), ignore_glob=set(args.ignore_glob),
+            ignore_http_codes=set(int(c) for c in args.ignore_http_code))
 
 
 if __name__ == '__main__':
