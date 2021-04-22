@@ -134,7 +134,7 @@ class AsyncStaticFileTransport(httpcore.AsyncHTTPTransport):
         if method != b'GET':
             return 400, {}, httpcore.PlainByteStream(b''), {}
 
-        path = posixpath.normpath(unquote(url[3]))
+        path = posixpath.normpath(unquote(url[3].decode("ascii")))
 
         # don't allow any path seperators that are not /
         for sep in (os.path.sep, os.path.altsep):
