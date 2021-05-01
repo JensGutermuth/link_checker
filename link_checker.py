@@ -139,31 +139,44 @@ async def check_urls(client: httpx.AsyncClient, urls: typing.Iterable,
     return not errors
 
 
-async def chunked_file(f):
-    for chunk in iter(lambda: f.read(2**20), b''):
-        yield chunk
+class AsyncFileStream():
+    def __init__(self, f: typing.BinaryIO):
+        self.f = f
+
+    async def __aiter__(self) -> typing.AsyncIterator[bytes]:
+        for chunk in iter(lambda: self.f.read(2**20), b''):
+            yield chunk
+
+    async def aclose(self) -> None:
+        self.f.close()
 
 
-class AsyncStaticFileTransport(httpcore.AsyncHTTPTransport):
+class AsyncStaticFileTransport(httpx.AsyncBaseTransport):
     def __init__(self, directory: str):
         self.directory = directory
 
-    async def arequest(self, method: bytes, url: URL, headers: Headers = None,
-                       stream: httpcore.AsyncByteStream = None,
-                       ext: dict = None) -> typing.Tuple[int, Headers, httpcore.AsyncByteStream, dict]:
-
+    async def handle_async_request(
+        self,
+        method: bytes,
+        url: typing.Tuple[bytes, bytes, typing.Optional[int], bytes],
+        headers: typing.List[typing.Tuple[bytes, bytes]],
+        stream: httpx.AsyncByteStream,
+        extensions: dict,
+    ) -> typing.Tuple[
+        int, typing.List[typing.Tuple[bytes, bytes]], httpx.AsyncByteStream, dict
+    ]:
         if method != b'GET':
-            return 400, {}, httpcore.PlainByteStream(b''), {}
+            return 400, [], [b""], {}
 
         path = posixpath.normpath(unquote(url[3].decode("ascii")))
 
         # don't allow any path seperators that are not /
         for sep in (os.path.sep, os.path.altsep):
             if sep not in (None, '/') and sep in path:
-                return 404, {}, httpcore.PlainByteStream(b''), {}
+                return 404, [], [b""], {}
 
         if '/../' in path:
-            return 404, {}, httpcore.PlainByteStream(b''), {}
+            return 404, [], [b""], {}
 
         contenttype, _ = mimetypes.guess_type(path)
         if not contenttype:
@@ -176,11 +189,9 @@ class AsyncStaticFileTransport(httpcore.AsyncHTTPTransport):
                 headers[b"Content-Type"] = b"text/html"
                 f = open(os.path.join(self.directory, path.lstrip('/'), "index.html"), "rb")
 
-            return 200, headers, \
-                httpcore.AsyncIteratorByteStream(chunked_file(f)), \
-                {}
+            return 200, list(headers.items()), AsyncFileStream(f), {}
         except FileNotFoundError:
-            return 404, {}, httpcore.PlainByteStream(b''), {}
+            return 404, [], [b""], {}
 
 
 async def main():
