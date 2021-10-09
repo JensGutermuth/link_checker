@@ -81,7 +81,8 @@ async def check_urls(client: httpx.AsyncClient, urls: typing.Iterable,
             async with request_for[urlsplit(url).hostname]:
                 r = await client.get(
                     url, headers={b"User-Agent": user_agent.encode("ascii")})
-        except (httpx.NetworkError, httpx.TimeoutException, httpx.ProtocolError) as e:
+        except (httpx.NetworkError, httpx.TimeoutException,
+                httpx.ProtocolError, httpx.TooManyRedirects) as e:
             err_str = str(e)
             if not err_str:
                 err_str = "Error: " + repr(e)
