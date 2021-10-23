@@ -140,7 +140,7 @@ async def check_urls(client: httpx.AsyncClient, urls: typing.Iterable,
     return not errors
 
 
-class AsyncFileStream():
+class AsyncFileStream(httpx.AsyncByteStream):
     def __init__(self, f: typing.BinaryIO):
         self.f = f
 
@@ -158,27 +158,26 @@ class AsyncStaticFileTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(
         self,
-        method: bytes,
-        url: typing.Tuple[bytes, bytes, typing.Optional[int], bytes],
-        headers: typing.List[typing.Tuple[bytes, bytes]],
-        stream: httpx.AsyncByteStream,
-        extensions: dict,
-    ) -> typing.Tuple[
-        int, typing.List[typing.Tuple[bytes, bytes]], httpx.AsyncByteStream, dict
-    ]:
-        if method != b'GET':
-            return 400, [], [b""], {}
+        request: httpx.Request,
+    ) -> httpx.Response:
+        if request.method != 'GET':
+            return httpx.Response(
+                status_code=404,
+            )
 
-        path = posixpath.normpath(unquote(url[3].decode("ascii")))
+        path = posixpath.normpath(unquote(request.url.path))
 
         # don't allow any path seperators that are not /
         for sep in (os.path.sep, os.path.altsep):
             if sep not in (None, '/') and sep in path:
-                return 404, [], [b""], {}
-
+                return httpx.Response(
+                    status_code=404,
+                )
         if '/../' in path:
-            return 404, [], [b""], {}
-
+            print(path)
+            return httpx.Response(
+                status_code=404,
+            )
         contenttype, _ = mimetypes.guess_type(path)
         if not contenttype:
             contenttype = "application/octet-steam"
@@ -190,9 +189,16 @@ class AsyncStaticFileTransport(httpx.AsyncBaseTransport):
                 headers[b"Content-Type"] = b"text/html"
                 f = open(os.path.join(self.directory, path.lstrip('/'), "index.html"), "rb")
 
-            return 200, list(headers.items()), AsyncFileStream(f), {}
+            return httpx.Response(
+                status_code=200,
+                headers=list(headers.items()),
+                stream=AsyncFileStream(f),
+            )
+
         except FileNotFoundError:
-            return 404, [], [b""], {}
+            return httpx.Response(
+                status_code=404,
+            )
 
 
 async def main():
