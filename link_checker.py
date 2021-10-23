@@ -80,13 +80,14 @@ async def check_urls(client: httpx.AsyncClient, urls: typing.Iterable,
         try:
             async with request_for[urlsplit(url).hostname]:
                 r = await client.get(
-                    url, headers={b"User-Agent": user_agent.encode("ascii")})
+                    url, headers={b"User-Agent": user_agent.encode("ascii")},
+                    follow_redirects=True)
         except (httpx.NetworkError, httpx.TimeoutException,
                 httpx.ProtocolError, httpx.TooManyRedirects) as e:
             err_str = str(e)
             if not err_str:
                 err_str = "Error: " + repr(e)
-            return url, None, err_str
+            return url, None, err_str, None
         except h2.exceptions.ProtocolError as e:
             err_str = str(e)
             if 'RECV_HEADERS' not in err_str or 'CLOSED' not in err_str:
@@ -104,10 +105,21 @@ async def check_urls(client: httpx.AsyncClient, urls: typing.Iterable,
 
             return await make_request(url, attempt=attempt+1)
 
-        if r.status_code != httpx.codes.OK and r.status_code not in ignore_http_codes:
-            return url, r, f"HTTP Error {r.status_code}: {r.reason_phrase}"
+        err_msgs = []
+        warn_msgs = []
+        if r.history:
+            warn_msgs.append(f"redirected to {r.url} via " + ", ".join(str(h.url) for h in r.history))
 
-        return url, r, None
+        if r.status_code != httpx.codes.OK:
+            if r.status_code in ignore_http_codes:
+                warn_msgs.append(f"HTTP Error {r.status_code}: {r.reason_phrase}")
+            else:
+                err_msgs.append(f"HTTP Error {r.status_code}: {r.reason_phrase}")
+
+        err_msg = ", ".join(err_msgs) if err_msgs else None
+        warn_msg = ", ".join(warn_msgs) if warn_msgs else None
+
+        return url, r, err_msg, warn_msg
 
     seen_urls = defaultdict(set)
     for u in urls:
@@ -115,14 +127,21 @@ async def check_urls(client: httpx.AsyncClient, urls: typing.Iterable,
 
     running_tasks = set(asyncio.create_task(make_request(u)) for u in seen_urls)
     errors: typing.Dict[str, str] = {}
+    warnings: typing.Dict[str, str] = {}
 
     while running_tasks:
         finished_tasks, running_tasks = await asyncio.wait(running_tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in finished_tasks:
-            req_url, r, e = await task
+            req_url, r, e, w = await task
+
+            if w:
+                warnings[req_url] = w
+
             if e:
-                errors[req_url] = str(e)
+                errors[req_url] = e
             elif r.headers['Content-Type'].startswith("text/html") and urlsplit(req_url).netloc in recurse_in_domains:
+                if w:
+                    warnings[req_url] = str(e)
                 for url in extract_links(r.content, str(r.url)):
                     if urlsplit(url).scheme == "mailto":
                         continue
@@ -132,11 +151,21 @@ async def check_urls(client: httpx.AsyncClient, urls: typing.Iterable,
                     if len(seen_urls[url]) == 1:
                         running_tasks.add(asyncio.create_task(make_request(url)))
     seen_urls.default_factory = None
-    for url, error in sorted(errors.items()):
-        print(f"{url}:")
-        print(f"\tfound on:\n" + "\n".join(f"\t- {u}" for u in seen_urls[url]))
-        print(f"\t{error}")
-    print(f"{len(seen_urls)} URLs checked in total, {len(errors)} errors")
+    if errors:
+        print("\n## Errors ##\n")
+        for url, error in sorted(errors.items()):
+            print(f"{url}:")
+            print(f"\tfound on:\n" + "\n".join(f"\t- {u}" for u in seen_urls[url]))
+            print(f"\t{error}")
+
+    if warnings:
+        print("\n## Warnings ##\n")
+        for url, warn in sorted(warnings.items()):
+            print(f"{url}:")
+            print(f"\tfound on:\n" + "\n".join(f"\t- {u}" for u in seen_urls[url]))
+            print(f"\t{warn}")
+
+    print(f"{len(seen_urls)} URLs checked in total, {len(warnings)} warnings, {len(errors)} errors")
     return not errors
 
 
