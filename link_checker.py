@@ -12,9 +12,7 @@ from contextlib import suppress
 from urllib.parse import unquote, urljoin, urlsplit
 
 import h2.exceptions
-import httpcore
 import httpx
-from httpcore._types import URL, Headers
 from lxml import etree
 from lxml.cssselect import CSSSelector
 
